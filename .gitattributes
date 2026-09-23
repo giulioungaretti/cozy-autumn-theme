@@ -1,0 +1,7 @@
+*.jpg binary
+*.png binary
+*.wav binary
+*.cur binary
+*.ani binary
+*.ps1 text eol=crlf
+
