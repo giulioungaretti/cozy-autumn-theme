@@ -3,10 +3,44 @@
 .SYNOPSIS
   Installs the Cozy Autumn theme (wallpaper slideshow, orange accent, dark mode,
   sound scheme, cursor schemes). Use -Apply to switch to it immediately and
-  -LockScreen to also set the lock screen picture.
+  -LockScreen to also set the lock screen picture. -WallpapersOnly preserves the
+  existing theme's other fields. -ValidateOnly performs read-only asset checks.
 #>
-param([switch]$Apply, [switch]$LockScreen)
+param([switch]$Apply, [switch]$LockScreen, [switch]$WallpapersOnly, [switch]$ValidateOnly)
 $ErrorActionPreference = 'Stop'
+
+$Here = $PSScriptRoot
+$manifestPath = Join-Path $Here 'wallpapers.json'
+if (-not (Test-Path -LiteralPath $manifestPath)) { throw 'Missing wallpapers.json. Use the curated collection, not the legacy fetching scripts.' }
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$sourceWalls = Join-Path $Here 'Wallpapers'
+$files = @(Get-ChildItem -LiteralPath $sourceWalls -Filter *.jpg -File)
+if ($files.Count -eq 0 -or $files.Count -ne @($manifest.photos).Count) { throw 'Wallpaper inventory does not match wallpapers.json.' }
+if (@($manifest.photos.file | Select-Object -Unique).Count -ne $files.Count) { throw 'Duplicate wallpaper manifest entries.' }
+$credits = Get-Content -LiteralPath (Join-Path $Here 'CREDITS.md') -Raw
+Add-Type -AssemblyName System.Drawing
+foreach ($photo in $manifest.photos) {
+    if ($photo.file -ne [IO.Path]::GetFileName($photo.file)) { throw "Invalid wallpaper filename: $($photo.file)" }
+    $path = Join-Path $sourceWalls $photo.file
+    if (-not (Test-Path -LiteralPath $path)) { throw "Missing wallpaper: $path" }
+    if (-not $photo.artist -or -not $photo.source -or -not $photo.license_url) { throw "Missing attribution: $($photo.file)" }
+    if ($photo.license -notmatch '^(CC0|Public domain|PD|CC BY(-SA)? ([1-4]\.0|2\.5))$') { throw "Unapproved or missing license: $($photo.file)" }
+    if (-not $credits.Contains($photo.file) -or -not $credits.Contains($photo.source) -or -not $credits.Contains($photo.license_url)) { throw "Missing credit row: $($photo.file)" }
+    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $photo.sha256) { throw "Wallpaper checksum mismatch: $($photo.file)" }
+    $image = [Drawing.Image]::FromFile($path)
+    try {
+        if ($image.Width -lt 3840 -or $image.Height -lt 2160 -or $image.Width -ne $photo.width -or $image.Height -ne $photo.height) {
+            throw "Wallpaper dimensions do not meet the native 4K policy: $($photo.file)"
+        }
+    } finally { $image.Dispose() }
+}
+foreach ($name in @($manifest.default_wallpaper, $manifest.lock_screen)) {
+    if ($name -notin @($manifest.photos.file)) { throw "Default image is not in the curated collection: $name" }
+}
+if ($ValidateOnly) {
+    Write-Host "Validated $($files.Count) native 4K wallpapers and their manifest. No files or settings changed."
+    return
+}
 
 $Themes = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Themes'
 $Root = Join-Path $Themes 'CozyAutumn'
@@ -18,18 +52,53 @@ $SchemeName = 'Cozy Autumn'
 $Accent = '0XC4D9622B'   # burnt orange (AARRGGBB)
 
 # Running from a repo clone / download: copy the assets into the Windows themes folder first.
-$Here = $PSScriptRoot
+$themeFile = Join-Path $Themes 'CozyAutumn.theme'
+if ($WallpapersOnly -and -not (Test-Path -LiteralPath $themeFile)) {
+    throw 'The existing CozyAutumn.theme was not found. Install the full theme first, or omit -WallpapersOnly.'
+}
+if ($WallpapersOnly) {
+    $existingTheme = [IO.File]::ReadAllText($themeFile)
+    if ($existingTheme -notmatch '(?m)^Wallpaper=' -or $existingTheme -notmatch '(?m)^ImagesRootPath=') {
+        throw 'Existing theme is missing wallpaper/slideshow fields. Nothing replaced.'
+    }
+}
+$backup = Join-Path $Root ('WallpaperBackups\' + (Get-Date -Format 'yyyyMMdd-HHmmss-ffff'))
 if ((Resolve-Path $Here).Path.TrimEnd('\') -ne $Root.TrimEnd('\')) {
-    foreach ($d in 'Wallpapers', 'Sounds', 'Cursors') {
+    $assetFolders = if ($WallpapersOnly) { @('Wallpapers') } else { @('Wallpapers', 'Sounds', 'Cursors') }
+    foreach ($d in $assetFolders) {
         if (-not (Test-Path (Join-Path $Here $d))) { throw "Missing folder next to install.ps1: $d" }
     }
+    if (Test-Path -LiteralPath $Walls) {
+        New-Item -ItemType Directory -Path $backup -Force | Out-Null
+        robocopy $Walls (Join-Path $backup 'Wallpapers') /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "Backing up wallpapers failed (robocopy exit $LASTEXITCODE). Nothing replaced." }
+        foreach ($name in 'wallpapers.json', 'CREDITS.md') {
+            if (Test-Path -LiteralPath (Join-Path $Root $name)) { Copy-Item -LiteralPath (Join-Path $Root $name) -Destination $backup }
+        }
+        if (Test-Path -LiteralPath $themeFile) { Copy-Item -LiteralPath $themeFile -Destination $backup }
+        Write-Host "Original collection preserved: $backup"
+    }
     New-Item -ItemType Directory -Path $Root -Force | Out-Null
-    foreach ($d in 'Wallpapers', 'Sounds', 'Cursors') {
+    foreach ($d in $assetFolders) {
         robocopy (Join-Path $Here $d) (Join-Path $Root $d) /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
         if ($LASTEXITCODE -ge 8) { throw "Copying $d failed (robocopy exit $LASTEXITCODE)" }
     }
     Copy-Item -Path (Join-Path $Here '*.ps1'), (Join-Path $Here '*.md') -Destination $Root -Force
+    Copy-Item -LiteralPath $manifestPath -Destination $Root -Force
     Write-Host "Copied theme files to $Root"
+}
+
+if ($WallpapersOnly) {
+    $text = $existingTheme
+    $text = [regex]::Replace($text, '(?m)^Wallpaper=[^\r\n]*', [System.Text.RegularExpressions.MatchEvaluator]{ param($m) "Wallpaper=$(Join-Path $Walls $manifest.default_wallpaper)" })
+    $text = [regex]::Replace($text, '(?m)^ImagesRootPath=[^\r\n]*', [System.Text.RegularExpressions.MatchEvaluator]{ param($m) "ImagesRootPath=$Walls" })
+    [IO.File]::WriteAllText($themeFile, $text, [Text.UnicodeEncoding]::new($false, $true))
+    if ($Apply) {
+        Start-Process "$env:SystemRoot\system32\rundll32.exe" -ArgumentList "`"$env:SystemRoot\system32\themecpl.dll`",OpenThemeAction `"$themeFile`""
+    }
+    if ($LockScreen) { & (Join-Path $Root 'set-lockscreen.ps1') -Image (Join-Path $Walls $manifest.lock_screen) }
+    Write-Host "Updated wallpapers only: $($files.Count). Sounds, cursors and theme colors preserved."
+    return
 }
 
 $sounds = [ordered]@{
@@ -69,7 +138,7 @@ $cursors = [ordered]@{
 }
 
 foreach ($p in $Walls, $Snd, $Cur) { if (-not (Test-Path $p)) { throw "Missing folder: $p" } }
-$first = Get-ChildItem $Walls -Filter *.jpg | Sort-Object Name | Select-Object -First 1
+$first = Get-Item -LiteralPath (Join-Path $Walls $manifest.default_wallpaper)
 if (-not $first) { throw "No wallpapers found in $Walls" }
 
 # --- register sound scheme -------------------------------------------------
@@ -137,7 +206,6 @@ foreach ($e in $sounds.GetEnumerator()) {
 $null = $sb.AppendLine('[MasterThemeSelector]')
 $null = $sb.AppendLine('MTSM=RJSPBS')
 
-$themeFile = Join-Path $Themes 'CozyAutumn.theme'
 $text = $sb.ToString()
 # Plain ASCII like the built-in themes; fall back to UTF-16 (also supported) if a path has non-ASCII characters.
 $enc = if ($text -match '[^\x00-\x7F]') { [System.Text.UnicodeEncoding]::new($false, $true) } else { [System.Text.Encoding]::ASCII }
@@ -147,12 +215,10 @@ Write-Host "Theme written: $themeFile"
 Write-Host "Wallpapers: $((Get-ChildItem $Walls -Filter *.jpg).Count)"
 
 if ($Apply) {
-    # A hung Settings process makes OpenThemeAction fail silently, so close it first.
-    Get-Process SystemSettings -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Process "$env:SystemRoot\system32\rundll32.exe" -ArgumentList "$env:SystemRoot\system32\themecpl.dll,OpenThemeAction $themeFile"
+    Start-Process "$env:SystemRoot\system32\rundll32.exe" -ArgumentList "`"$env:SystemRoot\system32\themecpl.dll`",OpenThemeAction `"$themeFile`""
     Write-Host 'Applying theme...'
 }
 
 if ($LockScreen) {
-    & (Join-Path $Root 'set-lockscreen.ps1') -Image (Join-Path $Walls 'bi-501-vermont-fall-foliage.jpg')
+    & (Join-Path $Root 'set-lockscreen.ps1') -Image (Join-Path $Walls $manifest.lock_screen)
 }

@@ -1,7 +1,11 @@
 #Requires -Version 5.1
 <# Sets the Windows lock screen to a Cozy Autumn wallpaper. Usage: .\set-lockscreen.ps1 [-Image <path>] #>
-param([string]$Image = (Join-Path $PSScriptRoot 'Wallpapers\bi-501-vermont-fall-foliage.jpg'))
+param([string]$Image)
 $ErrorActionPreference = 'Stop'
+if (-not $Image) {
+    $manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'wallpapers.json') -Raw | ConvertFrom-Json
+    $Image = Join-Path (Join-Path $PSScriptRoot 'Wallpapers') $manifest.lock_screen
+}
 if (-not (Test-Path $Image)) { throw "Image not found: $Image" }
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $ext = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 }
